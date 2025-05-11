@@ -1,0 +1,460 @@
+import tkinter as tk
+from tkinter import ttk, messagebox
+from typing import List, Callable, Optional, Union
+import serial.tools.list_ports
+import logging
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.figure import Figure
+import os
+
+
+class EMGgui:
+    def __init__(self,
+                 root: tk.Tk,
+                 on_start_callback: Optional[Callable] = None,
+                 on_connect_callback: Optional[Callable] = None,
+                 on_add_signal_callback: Optional[Callable] = None,
+                 on_delete_signal_callback: Optional[Callable] = None,
+                 on_link_simulator_callback: Optional[Callable] = None):
+        """
+        Initialize EMG GUI application.
+        """
+        self.root = root
+        self._setup_logger()
+        self._setup_main_window()
+
+        # Initialize callbacks
+        self.on_start_callback = on_start_callback
+        self.on_connect_callback = on_connect_callback
+        self.on_add_signal_callback = on_add_signal_callback
+        self.on_delete_signal_callback = on_delete_signal_callback
+        self.on_link_simulator_callback = on_link_simulator_callback
+
+        # Setup UI components
+        self._create_frames()
+        self._create_connection_settings()
+        self._create_signal_management()
+        self._create_plot()
+
+    def _setup_logger(self):
+        """Configure logger for GUI events."""
+        self.logger = logging.getLogger('EMGgui')
+        self.logger.setLevel(logging.INFO)
+
+        handler = logging.StreamHandler()
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        handler.setFormatter(formatter)
+
+        if not self.logger.handlers:
+            self.logger.addHandler(handler)
+
+    def _find_file(self, filename, search_paths=None):
+        """
+        Search for a file in multiple locations with detailed logging
+
+        Args:
+            filename: Name of the file to find
+            search_paths: Optional list of paths to search (defaults to common locations)
+
+        Returns:
+            Absolute path if found, None otherwise
+        """
+        if search_paths is None:
+            search_paths = [
+                os.path.dirname(__file__),  # 1. Script directory
+                os.getcwd(),  # 2. Current working directory
+                os.path.join(os.path.dirname(__file__), "data"),  # 3. Data subdirectory
+                os.path.expanduser("~"),  # 4. Home directory
+                os.path.join(os.path.expanduser("~"), "Desktop")  # 5. Desktop
+            ]
+
+        for path in search_paths:
+            full_path = os.path.join(path, filename)
+            if os.path.exists(full_path):
+                self.logger.info(f"تم العثور على الملف {filename} في: {os.path.abspath(full_path)}")
+                return os.path.abspath(full_path)
+
+        self.logger.error(f"الملف {filename} غير موجود في المسارات التالية:\n" + "\n".join(search_paths))
+        return None
+    def _setup_main_window(self):
+        """Configure main window properties."""
+        self.root.title("نظام كشف حركة اليد - EMG")
+        self.root.geometry("1000x600")
+        self.root.configure(bg="#ecf0f1")
+        self.root.minsize(800, 500)
+
+        # Improved icon path handling
+        icon_paths = [
+            os.path.join(os.path.dirname(__file__), "icon.ico"),  # 1. Same directory
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon.ico"),  # 2. Absolute path
+            os.path.join(os.getcwd(), "icon.ico"),  # 3. Current working directory
+            "icon.ico"  # 4. Direct file name
+        ]
+
+        icon_found = False
+        for path in icon_paths:
+            if os.path.exists(path):
+                try:
+                    self.root.iconbitmap(path)
+                    self.logger.info(f"تم تحميل الأيقونة بنجاح من: {os.path.abspath(path)}")
+                    icon_found = True
+                    break
+                except Exception as e:
+                    self.logger.warning(f"فشل تحميل الأيقونة من {path}: {e}")
+
+        if not icon_found:
+            error_msg = (
+                    "لم يتم العثور على ملف الأيقونة في المسارات التالية:\n"
+                    + "\n".join([f"• {os.path.abspath(p)}" for p in icon_paths])
+                    + "\n\nسيتم استخدام الأيقونة الافتراضية"
+            )
+            self.logger.warning(error_msg)
+            messagebox.showwarning("تحذير", error_msg)
+
+    def _create_frames(self):
+        """Create main application frames."""
+        # Left frame for controls
+        self.left_frame = tk.Frame(
+            self.root,
+            bg="#ecf0f1",
+            width=300,
+            padx=10,
+            pady=10
+        )
+        self.left_frame.pack(side="left", fill="y")
+        self.left_frame.pack_propagate(False)
+
+        # Right frame for plot
+        self.right_frame = tk.Frame(
+            self.root,
+            bg="#ecf0f1",
+            padx=10,
+            pady=10
+        )
+        self.right_frame.pack(side="right", fill="both", expand=True)
+
+    def _create_connection_settings(self):
+        """Create a connection settings section."""
+        section_label = tk.Label(
+            self.left_frame,
+            text="إعدادات الاتصال",
+            font=("Helvetica", 14, "bold"),
+            bg="#ecf0f1"
+        )
+        section_label.pack(pady=10, anchor="w")
+
+        # Port selection
+        port_frame = tk.Frame(self.left_frame, bg="#ecf0f1")
+        port_frame.pack(fill="x", pady=5)
+
+        tk.Label(
+            port_frame,
+            text="المنفذ:",
+            bg="#ecf0f1"
+        ).pack(side="left")
+
+        self.port_combo = ttk.Combobox(
+            port_frame,
+            values=self._get_serial_ports(),
+            state="readonly"
+        )
+        self.port_combo.pack(side="right", expand=True, fill="x")
+
+        # Refresh button
+        refresh_button = tk.Button(
+            self.left_frame,
+            text="تحديث المنافذ",
+            command=self._refresh_ports,
+            bg="#3498db",
+            fg="white"
+        )
+        refresh_button.pack(fill="x", pady=5)
+
+        # Baud rate selection
+        baud_frame = tk.Frame(self.left_frame, bg="#ecf0f1")
+        baud_frame.pack(fill="x", pady=5)
+
+        tk.Label(
+            baud_frame,
+            text="معدل البود:",
+            bg="#ecf0f1"
+        ).pack(side="left")
+
+        self.baud_combo = ttk.Combobox(
+            baud_frame,
+            values=[9600, 115200, 57600, 38400, 19200, 4800],
+            state="readonly"
+        )
+        self.baud_combo.current(0)
+        self.baud_combo.pack(side="right", expand=True, fill="x")
+
+        # Connect button
+        self.connect_button = tk.Button(
+            self.left_frame,
+            text="اتصال",
+            command=self._on_connect,
+            bg="#2ecc71",
+            fg="white"
+        )
+        self.connect_button.pack(fill="x", pady=5)
+
+        # Sample rate control
+        sample_frame = tk.Frame(self.left_frame, bg="#ecf0f1")
+        sample_frame.pack(fill="x", pady=10)
+
+        tk.Label(
+            sample_frame,
+            text="معدل العينة (عينات/ثانية):",
+            bg="#ecf0f1"
+        ).pack(anchor="w")
+
+        control_frame = tk.Frame(sample_frame, bg="#ecf0f1")
+        control_frame.pack(fill="x")
+
+        self.sample_rate = tk.IntVar(value=1)
+
+        tk.Button(
+            control_frame,
+            text="−",
+            command=self._decrease_sample_rate,
+            width=3
+        ).pack(side="left")
+
+        tk.Label(
+            control_frame,
+            textvariable=self.sample_rate,
+            width=5,
+            bg="#ecf0f1",
+            relief="sunken"
+        ).pack(side="left", padx=5)
+
+        tk.Button(
+            control_frame,
+            text="+",
+            command=self._increase_sample_rate,
+            width=3
+        ).pack(side="left")
+
+    def _create_signal_management(self):
+        """Create a signal management section."""
+        section_label = tk.Label(
+            self.left_frame,
+            text="إدارة الإشارات",
+            font=("Helvetica", 14, "bold"),
+            bg="#ecf0f1"
+        )
+        section_label.pack(pady=10, anchor="w")
+
+        # Stored movements
+        tk.Label(
+            self.left_frame,
+            text="الحركات المخزنة:",
+            bg="#ecf0f1"
+        ).pack(anchor="w")
+
+        self.label_list_combo = ttk.Combobox(
+            self.left_frame,
+            values=[],
+            state="readonly"
+        )
+        self.label_list_combo.pack(fill="x", pady=5)
+
+        # Current signal
+        tk.Label(
+            self.left_frame,
+            text="الإشارة الحالية:",
+            bg="#ecf0f1"
+        ).pack(anchor="w")
+
+        self.signal_combo = ttk.Combobox(
+            self.left_frame,
+            values=[],
+            state="readonly"
+        )
+        self.signal_combo.pack(fill="x", pady=5)
+
+        # Action buttons
+        button_frame = tk.Frame(self.left_frame, bg="#ecf0f1")
+        button_frame.pack(fill="x", pady=5)
+
+        tk.Button(
+            button_frame,
+            text="إضافة إشارة",
+            command=self._on_add_signal,
+            bg="#3498db",
+            fg="white"
+        ).pack(side="left", expand=True, fill="x", padx=2)
+
+        tk.Button(
+            button_frame,
+            text="حذف الإشارة",
+            command=self._on_delete_signal,
+            bg="#e74c3c",
+            fg="white"
+        ).pack(side="left", expand=True, fill="x", padx=2)
+
+        tk.Button(
+            self.left_frame,
+            text="ربط بالمحاكي",
+            command=self._on_link_simulator,
+            bg="#9b59b6",
+            fg="white"
+        ).pack(fill="x", pady=5)
+
+    def _create_plot(self):
+        """Create the signal plot area."""
+        self.figure = Figure(figsize=(5, 4), dpi=100)
+        self.ax = self.figure.add_subplot(111)
+        self._configure_plot_axes()
+
+        self.canvas = FigureCanvasTkAgg(self.figure, master=self.right_frame)
+        self.canvas.draw()
+        self.canvas.get_tk_widget().pack(fill="both", expand=True)
+
+    def _configure_plot_axes(self):
+        """Configure plot axes with default settings."""
+        self.ax.clear()
+        self.ax.set_title("EMG Signal", pad=20)
+        self.ax.set_xlabel("Time (samples)")
+        self.ax.set_ylabel("Amplitude (mV)")
+        self.ax.grid(True, linestyle='--', alpha=0.7)
+
+    @staticmethod
+    def _get_serial_ports() -> List[str]:
+        """Get a list of available serial ports."""
+        ports = serial.tools.list_ports.comports()
+        return [port.device for port in ports]
+
+    def _refresh_ports(self):
+        """Refresh the list of available serial ports."""
+        ports = self._get_serial_ports()
+        self.port_combo['values'] = ports
+
+        if ports:
+            self.port_combo.current(0)
+        else:
+            self.show_error("لا توجد منافذ متاحة")
+            self.logger.warning("No serial ports available")
+
+    def _increase_sample_rate(self):
+        """Increase the sample rate by 1."""
+        current = self.sample_rate.get()
+        self.sample_rate.set(current + 1)
+        self.logger.info(f"Sample rate increased to {current + 1}")
+
+    def _decrease_sample_rate(self):
+        """Decrease sample rate by 1 (minimum 1)."""
+        current = self.sample_rate.get()
+        if current > 1:
+            self.sample_rate.set(current - 1)
+            self.logger.info(f"Sample rate decreased to {current - 1}")
+
+    def _on_connect(self):
+        """Handle connect button click."""
+        if self.on_connect_callback:
+            try:
+                self.on_connect_callback()
+            except (serial.SerialException, ValueError) as e:
+                self.logger.error(f"Connection error: {e}")
+                self.show_error(f"فشل الاتصال: {str(e)}")
+            except Exception as e:
+                self.logger.error(f"Unexpected connection error: {e}")
+                self.show_error("حدث خطأ غير متوقع أثناء الاتصال")
+
+    def _on_add_signal(self):
+        """Handle add signal button click."""
+        if self.on_add_signal_callback:
+            try:
+                self.on_add_signal_callback()
+            except ValueError as e:
+                self.logger.error(f"Add signal error: {e}")
+                self.show_error(f"فشل إضافة الإشارة: {str(e)}")
+            except Exception as e:
+                self.logger.error(f"Unexpected add signal error: {e}")
+                self.show_error("حدث خطأ غير متوقع أثناء إضافة الإشارة")
+
+    def _on_delete_signal(self):
+        """Handle delete signal button click."""
+        if self.on_delete_signal_callback:
+            try:
+                self.on_delete_signal_callback()
+            except KeyError as e:
+                self.logger.error(f"Delete signal error: {e}")
+                self.show_error(f"فشل حذف الإشارة: {str(e)}")
+            except Exception as e:
+                self.logger.error(f"Unexpected delete signal error: {e}")
+                self.show_error("حدث خطأ غير متوقع أثناء حذف الإشارة")
+
+    def _on_link_simulator(self):
+        """Handle link simulator button click."""
+        if self.on_link_simulator_callback:
+            try:
+                self.on_link_simulator_callback()
+            except Exception as e:
+                self.logger.error(f"Simulator link error: {e}")
+                self.show_error(f"فشل الربط بالمحاكي: {str(e)}")
+
+    def update_signal_list(self, signals: List[Union[str, int]]) -> None:
+        """Update the list of available signals."""
+        str_signals = [str(s) for s in signals]
+        self.signal_combo['values'] = str_signals
+        if str_signals:
+            self.signal_combo.current(0)
+        self.logger.info(f"Signal list updated with {len(str_signals)} signals")
+
+    def update_label_list(self, labels: List[Union[str, int]]) -> None:
+        """Update the list of available movement labels."""
+        str_labels = [str(l) for l in labels]
+        self.label_list_combo['values'] = str_labels
+        if str_labels:
+            self.label_list_combo.current(0)
+        self.logger.info(f"Label list updated with {len(str_labels)} labels")
+
+    def update_plot(self, data: List[Union[int, float]]):
+        """Update the plot with new signal data."""
+        try:
+            self.ax.clear()
+
+            if data:
+                plot_data = [float(x) for x in data]
+                self.ax.plot(plot_data, color='#3498db', linewidth=1.5)
+                self.ax.set_xlim(0, len(plot_data))
+
+                y_min, y_max = min(plot_data), max(plot_data)
+                padding = max(10.0, (y_max - y_min) * 0.1)
+                self.ax.set_ylim(float(y_min - padding), float(y_max + padding))
+
+            self._configure_plot_axes()
+            self.canvas.draw()
+            self.logger.debug("Plot updated with new data")
+
+        except (ValueError, TypeError) as e:
+            self.logger.error(f"Plot data error: {e}")
+            self.show_error("بيانات الرسم البياني غير صالحة")
+        except Exception as e:
+            self.logger.error(f"Plot update error: {e}")
+            self.show_error("حدث خطأ أثناء تحديث الرسم البياني")
+
+    def set_connection_state(self, connected: bool):
+        """Update UI based on connection state."""
+        if connected:
+            self.connect_button.config(
+                text="قطع الاتصال",
+                bg="#e74c3c"
+            )
+        else:
+            self.connect_button.config(
+                text="اتصال",
+                bg="#2ecc71"
+            )
+        self.logger.info(f"Connection state set to: {'connected' if connected else 'disconnected'}")
+
+    def show_error(self, message: str):
+        """Show an error message to user."""
+        messagebox.showerror("خطأ", message)
+        self.logger.error(f"User error: {message}")
+
+    def show_info(self, message: str):
+        """Show an information message to user."""
+        messagebox.showinfo("معلومة", message)
+        self.logger.info(f"User info: {message}")
