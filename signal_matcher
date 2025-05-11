@@ -1,0 +1,190 @@
+import pandas as pd
+import numpy as np
+from typing import Dict, List, Union
+import logging
+from pathlib import Path
+
+
+class SignalMatcher:
+    def __init__(self, data_folder: str = "data"):
+        """
+        Initialize SignalMatcher with a data folder path.
+
+        Args:
+            data_folder: Path to folder containing signal datasets
+        """
+        self.logger = self._setup_logger()
+        self.data_folder = Path(data_folder)
+        self.data_folder.mkdir(parents=True, exist_ok=True)
+        self.dataset = self._load_data()
+
+    @staticmethod
+    def _setup_logger():
+        """Configure and return a logger instance."""
+        logger = logging.getLogger('SignalMatcher')
+        logger.setLevel(logging.INFO)
+
+        handler = logging.StreamHandler()
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        handler.setFormatter(formatter)
+
+        if not logger.handlers:
+            logger.addHandler(handler)
+
+        return logger
+
+    def _load_data(self) -> Dict[str, List[pd.DataFrame]]:
+        """
+        Load signal data from CSV files in the data folder.
+
+        Returns:
+            Dictionary where keys are labels and values are lists of DataFrames
+        """
+        dataset = {}
+
+        try:
+            for label_dir in self.data_folder.iterdir():
+                if label_dir.is_dir():
+                    label = label_dir.name
+                    dataset[label] = []
+
+                    for signal_file in label_dir.glob("*.csv"):
+                        try:
+                            if signal_file.stat().st_size == 0:
+                                self.logger.warning(f"Empty file: {signal_file}")
+                                continue
+
+                            df = pd.read_csv(
+                                signal_file,
+                                header=None,
+                                on_bad_lines='warn'
+                            )
+
+                            if not df.empty:
+                                dataset[label].append(df)
+                            else:
+                                self.logger.warning(f"Empty data in file: {signal_file}")
+
+                        except pd.errors.EmptyDataError:
+                            self.logger.warning(f"Empty data file: {signal_file}")
+                        except Exception as e:
+                            self.logger.error(f"Error reading file {signal_file}: {e}")
+
+        except Exception as e:
+            self.logger.error(f"Error loading data: {e}")
+            raise
+
+        return dataset
+
+    def match(self, signal: Union[List[float], np.ndarray]) -> str:
+        """
+        Match input signal with the closest reference signal in dataset.
+
+        Args:
+            signal: Input signal to match
+
+        Returns:
+            Label of the best matching signal or "unknown" if no match found
+        """
+        if not isinstance(signal, np.ndarray):
+            signal = np.array(signal)
+
+        min_dist = float('inf')
+        best_match = "unknown"
+
+        for label, ref_signals in self.dataset.items():
+            for ref_signal_df in ref_signals:
+                ref_signal = ref_signal_df.values.flatten()
+
+                if len(signal) != len(ref_signal):
+                    continue
+
+                try:
+                    dist = np.linalg.norm(signal - ref_signal)
+                    if dist < min_dist:
+                        min_dist = dist
+                        best_match = label
+                except Exception as e:
+                    self.logger.warning(f"Signal matching error: {e}")
+                    continue
+
+        return best_match
+
+    def save_signal(self, label: str, signal: Union[List[float], np.ndarray]) -> bool:
+        """
+        Save a signal to the dataset.
+
+        Args:
+            label: Category label for the signal
+            signal: Signal data to save
+
+        Returns:
+            True if save was successful, False otherwise
+        """
+        try:
+            label_dir = self.data_folder / label
+            label_dir.mkdir(exist_ok=True)
+
+            file_count = len(list(label_dir.glob("*.csv")))
+            file_name = f"sample_{file_count + 1}.csv"
+
+            df = pd.DataFrame([signal])
+            df.to_csv(
+                label_dir / file_name,
+                index=False,
+                header=False
+            )
+
+            # Refresh dataset
+            self.dataset = self._load_data()
+            self.logger.info(f"Signal saved successfully under label: {label}")
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Error saving signal: {e}")
+            return False
+
+    def delete_signal(self, label: str) -> bool:
+        """
+        Delete all signals for a given label.
+
+        Args:
+            label: Label to delete
+
+        Returns:
+            True if deletion was successful, False otherwise
+        """
+        try:
+            label_dir = self.data_folder / label
+
+            if label_dir.exists():
+                for signal_file in label_dir.glob("*"):
+                    signal_file.unlink()
+
+                label_dir.rmdir()
+                self.dataset.pop(label, None)
+                self.logger.info(f"Deleted all signals for label: {label}")
+                return True
+
+            self.logger.warning(f"Label does not exist: {label}")
+            return False
+
+        except Exception as e:
+            self.logger.error(f"Error deleting signals: {e}")
+            return False
+
+    def get_available_labels(self) -> List[str]:
+        """Return list of available signal labels."""
+        return list(self.dataset.keys())
+
+    def get_signal_count(self, label: str) -> int:
+        """
+        Get number of signals for a given label.
+
+        Args:
+            label: Label to check
+
+        Returns:
+            Number of signals for the label, 0 if label doesn't exist
+        """
+        return len(self.dataset.get(label, []))
