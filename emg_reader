@@ -1,0 +1,115 @@
+import serial
+from serial.tools import list_ports
+import logging
+from typing import List, Optional
+
+
+class EMGReader:
+    def __init__(self, port: str = None, baudrate: int = 9600, timeout: float = 1.0):
+        """
+        Initialize EMGReader with serial connection parameters.
+
+        Args:
+            port: Serial port name (e.g., 'COM3'). If None, will attempt auto-detection.
+            baudrate: Baud rate for serial communication.
+            timeout: Timeout for serial read operations.
+        """
+        self.logger = self._setup_logger()
+        self.ser = None
+        self.port = port or self._auto_detect_port()
+        self.baudrate = baudrate
+        self.timeout = timeout
+
+        try:
+            self.ser = serial.Serial(
+                port=self.port,
+                baudrate=self.baudrate,
+                timeout=self.timeout
+            )
+            self.logger.info(f"Connected successfully to port {self.port}")
+        except serial.SerialException as serial_error:
+            self.logger.error(f"Failed to open port {self.port}")
+            self.logger.error(f"Error details: {serial_error}")
+            raise ConnectionError(f"Failed to connect to port {self.port}: {str(serial_error)}")
+
+    @staticmethod
+    def _setup_logger():
+        """Configure and return a logger instance."""
+        logger = logging.getLogger('EMGReader')
+        logger.setLevel(logging.INFO)
+
+        handler = logging.StreamHandler()
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        handler.setFormatter(formatter)
+
+        if not logger.handlers:
+            logger.addHandler(handler)
+
+        return logger
+
+    @staticmethod
+    def _auto_detect_port() -> str:
+        """Attempt to automatically detect Arduino port."""
+        arduino_ports = [
+            p.device
+            for p in list_ports.comports()
+            if 'Arduino' in p.description or 'CH340' in p.description
+        ]
+
+        if not arduino_ports:
+            raise ConnectionError("No Arduino port found")
+        return arduino_ports[0]
+
+    def read_signal(self) -> Optional[List[float]]:
+        """
+        Read and parse EMG signal from serial port.
+
+        Returns:
+            List of float signal values, or None if read failed.
+        """
+        try:
+            if not self.ser or not self.ser.is_open:
+                raise ConnectionError("Connection is not active")
+
+            line = self.ser.readline().decode('utf-8').strip()
+            if not line:
+                return None
+
+            emg_signal = [float(x) for x in line.split(',') if x.strip()]
+            return emg_signal
+
+        except UnicodeDecodeError as decode_error:
+            self.logger.warning(f"Data decoding error: {decode_error}")
+            return None
+        except ValueError as value_error:
+            self.logger.warning(f"Invalid signal values: {value_error}")
+            return None
+        except Exception as read_error:
+            self.logger.error(f"Unexpected error reading signal: {read_error}")
+            return None
+
+    def close(self):
+        """Close the serial connection properly."""
+        if self.ser and self.ser.is_open:
+            self.ser.close()
+            self.logger.info("Serial connection closed")
+
+    def __enter__(self):
+        """Enable context manager support."""
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Ensure connection is closed when exiting context."""
+        self.close()
+
+
+if __name__ == "__main__":
+    # Example usage
+    try:
+        with EMGReader() as reader:
+            while True:
+                current_signal = reader.read_signal()
+                if current_signal:
+                    print(f"Received signal: {current_signal}")
+    except Exception as main_error:
+        print(f"Error occurred: {main_error}")
