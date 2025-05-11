@@ -1,0 +1,194 @@
+import threading
+import time
+import numpy as np
+import tkinter as tk
+from tkinter import simpledialog
+from typing import Optional
+import logging
+
+from emg_reader import EMGReader
+from signal_matcher import SignalMatcher
+from gui import EMGgui
+
+
+class EMGController:
+    def __init__(self):
+        """Initialize EMG controller with all components."""
+        self._setup_logger()
+        self.reader: Optional[EMGReader] = None
+        self.matcher: SignalMatcher = SignalMatcher()
+        self.sample_interval: float = 1.0
+        self.running: bool = False
+        self._init_gui()
+
+    def _setup_logger(self):
+        """Configure logger for controller events."""
+        self.logger = logging.getLogger('EMGController')
+        self.logger.setLevel(logging.INFO)
+
+        handler = logging.StreamHandler()
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        handler.setFormatter(formatter)
+
+        if not self.logger.handlers:
+            self.logger.addHandler(handler)
+
+    def _init_gui(self):
+        """Initialize and configure the GUI."""
+        root = tk.Tk()
+        self.gui = EMGgui(
+            root,
+            on_start_callback=self.start_reading,
+            on_connect_callback=self.connect,
+            on_add_signal_callback=self.add_signal,
+            on_delete_signal_callback=self.delete_signal,
+            on_link_simulator_callback=self.link_simulator
+        )
+        self._update_gui_labels()
+        root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _update_gui_labels(self):
+        """Update GUI with current available labels."""
+        labels = self.matcher.get_available_labels()
+        self.gui.update_label_list(labels)
+        self.logger.info(f"Updated GUI with {len(labels)} available labels")
+
+    def connect(self):
+        """Establish connection with an EMG device."""
+        port = self.gui.port_combo.get()
+        baud = int(self.gui.baud_combo.get())
+
+        try:
+            self.reader = EMGReader(port=port, baudrate=baud)
+            self.gui.set_connection_state(True)
+            self.gui.show_info(f"تم الاتصال بنجاح بـ {port} بسرعة {baud} بود")
+            self.logger.info(f"Connected to {port} at {baud} baud")
+        except Exception as e:
+            self.gui.show_error(f"فشل الاتصال: {str(e)}")
+            self.logger.error(f"Connection failed: {e}")
+
+    def start_reading(self):
+        """Start continuous reading of EMG signals."""
+        if not self.reader:
+            self.gui.show_error("يجب الاتصال بالجهاز أولاً")
+            return
+
+        self.sample_interval = 1.0 / self.gui.sample_rate.get()
+        self.running = True
+
+        thread = threading.Thread(target=self._update_loop, daemon=True)
+        thread.start()
+        self.logger.info("Started EMG reading thread")
+
+    def _update_loop(self):
+        """Main loop for reading and processing EMG signals."""
+        while self.running:
+            try:
+                signal = self.reader.read_signal()
+                if signal:
+                    self._process_signal(signal)
+
+            except Exception as e:
+                self.logger.error(f"Error in update loop: {e}")
+                self.gui.show_error(f"خطأ في قراءة الإشارة: {str(e)}")
+
+            time.sleep(self.sample_interval)
+
+    def _process_signal(self, signal: list):
+        """Process incoming EMG signal."""
+        try:
+            signal_np = np.array(signal)
+
+            # Skip if no reference signals available
+            if not self.matcher.dataset:
+                self.gui.update_plot(signal)
+                return
+
+            # Getfirst reference signal to check length
+            ref_signals = next(iter(self.matcher.dataset.values()))
+            if not ref_signals:
+                return
+
+            ref_signal = ref_signals[0].values.flatten()
+
+            if len(signal_np) == len(ref_signal):
+                movement = self.matcher.match(signal_np)
+                self.gui.signal_combo.set(movement)
+                self.gui.update_plot(signal)
+
+        except Exception as e:
+            self.logger.error(f"Signal processing error: {e}")
+
+    def add_signal(self):
+        """Add new signal to the database."""
+        if not self.reader:
+            self.gui.show_error("يجب الاتصال بالجهاز أولاً")
+            return
+
+        signal = self.reader.read_signal()
+        if not signal:
+            self.gui.show_error("لم يتم استقبال أي إشارة")
+            return
+
+        name = simpledialog.askstring("إضافة إشارة", "أدخل اسم الإشارة الجديدة:")
+        if not name:
+            return
+
+        try:
+            self.matcher.save_signal(name, np.array(signal))
+            self._update_gui_labels()
+            self.gui.show_info(f"تم حفظ الإشارة باسم: {name}")
+            self.logger.info(f"Saved new signal: {name}")
+        except Exception as e:
+            self.gui.show_error(f"فشل حفظ الإشارة: {str(e)}")
+            self.logger.error(f"Failed to save signal: {e}")
+
+    def delete_signal(self):
+        """Delete selected signal from a database."""
+        selected = self.gui.signal_combo.get()
+        if not selected or selected == "unknown":
+            self.gui.show_error("اختر إشارة صحيحة")
+            return
+
+        try:
+            self.matcher.delete_signal(selected)
+            self._update_gui_labels()
+            self.gui.show_info(f"تم حذف الإشارة: {selected}")
+            self.logger.info(f"Deleted signal: {selected}")
+        except Exception as e:
+            self.gui.show_error(f"فشل حذف الإشارة: {str(e)}")
+            self.logger.error(f"Failed to delete signal: {e}")
+
+    def link_simulator(self):
+        """Link current signal to simulator."""
+        selected = self.gui.signal_combo.get()
+        if not selected or selected == "unknown":
+            self.gui.show_error("لا توجد إشارة صالحة لإرسالها")
+            return
+
+        # Placeholder for actual simulator integration
+        self.logger.info(f"Sending movement {selected} to simulator")
+        self.gui.show_info(f"تم إرسال حركة {selected} للمحاكي")
+
+    def _on_close(self):
+        """Handle application close event."""
+        self.running = False
+        if self.reader:
+            self.reader.close()
+        self.gui.root.destroy()
+        self.logger.info("Application closed")
+
+    def run(self):
+        """Run the main application."""
+        self.logger.info("Starting EMG application")
+        self.gui.root.mainloop()
+
+
+def main():
+    """Main entry point for the application."""
+    controller = EMGController()
+    controller.run()
+
+
+if __name__ == "__main__":
+    main()
